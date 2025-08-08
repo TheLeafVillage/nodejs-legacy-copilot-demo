@@ -1,6 +1,4 @@
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const Joi = require('joi');
+const AuthService = require('../services/AuthService');
 const { db } = require('../config/database');
 
 // This is a LARGE MONOLITHIC CONTROLLER that handles multiple responsibilities
@@ -8,9 +6,7 @@ const { db } = require('../config/database');
 
 class UserController {
   constructor() {
-    // JWT Secret from environment variables (fallback for development only)
-    this.jwtSecret = process.env.JWT_SECRET || 'dev-fallback-secret-change-in-production';
-    this.saltRounds = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12;
+    // Remove JWT and bcrypt configuration as they're now handled by AuthService
   }
 
   // Mock email service - simulates sending emails without external dependencies
@@ -51,18 +47,8 @@ class UserController {
   // MASSIVE METHOD THAT HANDLES USER REGISTRATION
   async register(req, res) {
     try {
-      // Input validation
-      const schema = Joi.object({
-        username: Joi.string().min(3).max(50).required(),
-        email: Joi.string().email().required(),
-        password: Joi.string().min(6).required(),
-        first_name: Joi.string().max(50).required(),
-        last_name: Joi.string().max(50).required(),
-        phone: Joi.string().max(20),
-        address: Joi.string().max(500)
-      });
-
-      const { error, value } = schema.validate(req.body);
+      // Input validation using AuthService
+      const { error, value } = AuthService.validateRegistrationData(req.body);
       if (error) {
         return res.status(400).json({ error: error.details[0].message });
       }
@@ -81,8 +67,8 @@ class UserController {
         return res.status(409).json({ error: 'User already exists with this username or email' });
       }
 
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, this.saltRounds);
+      // Hash password using AuthService
+      const hashedPassword = await AuthService.hashPassword(password);
 
       // Insert user into database
       const userId = await new Promise((resolve, reject) => {
@@ -96,12 +82,9 @@ class UserController {
         );
       });
 
-      // Generate JWT token
-      const token = jwt.sign(
-        { userId, username, email },
-        this.jwtSecret,
-        { expiresIn: '24h' }
-      );
+      // Generate JWT token using AuthService
+      const userPayload = AuthService.createUserPayload({ id: userId, username, email });
+      const token = AuthService.generateToken(userPayload);
 
       // Log analytics event for user registration
       await new Promise((resolve, reject) => {
@@ -156,15 +139,12 @@ class UserController {
         });
       }
 
+      // Create sanitized user response using AuthService
+      const userResponse = AuthService.createUserResponse({ id: userId, username, email, first_name, last_name });
+
       res.status(201).json({
         message: 'User registered successfully',
-        user: {
-          id: userId,
-          username,
-          email,
-          first_name,
-          last_name
-        },
+        user: userResponse,
         token
       });
 
@@ -177,13 +157,8 @@ class UserController {
   // MASSIVE METHOD THAT HANDLES USER LOGIN AND ANALYTICS
   async login(req, res) {
     try {
-      // Input validation
-      const schema = Joi.object({
-        username: Joi.string().required(),
-        password: Joi.string().required()
-      });
-
-      const { error, value } = schema.validate(req.body);
+      // Input validation using AuthService
+      const { error, value } = AuthService.validateLoginData(req.body);
       if (error) {
         return res.status(400).json({ error: error.details[0].message });
       }
@@ -213,8 +188,8 @@ class UserController {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
-      // Verify password
-      const isPasswordValid = await bcrypt.compare(password, user.password);
+      // Verify password using AuthService
+      const isPasswordValid = await AuthService.authenticateUser(password, user.password);
       if (!isPasswordValid) {
         // Log failed login attempt with valid username
         await new Promise((resolve, reject) => {
@@ -230,12 +205,9 @@ class UserController {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
-      // Generate JWT token
-      const token = jwt.sign(
-        { userId: user.id, username: user.username, email: user.email },
-        this.jwtSecret,
-        { expiresIn: '24h' }
-      );
+      // Generate JWT token using AuthService
+      const userPayload = AuthService.createUserPayload(user);
+      const token = AuthService.generateToken(userPayload);
 
       // Log successful login
       await new Promise((resolve, reject) => {
@@ -249,15 +221,12 @@ class UserController {
         );
       });
 
+      // Create sanitized user response using AuthService
+      const userResponse = AuthService.createUserResponse(user);
+
       res.json({
         message: 'Login successful',
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          first_name: user.first_name,
-          last_name: user.last_name
-        },
+        user: userResponse,
         token
       });
 
@@ -270,17 +239,17 @@ class UserController {
   // MASSIVE METHOD THAT HANDLES ORDER CREATION, PAYMENT, AND NOTIFICATIONS
   async createOrder(req, res) {
     try {
-      // Extract user from JWT token
-      const token = req.headers.authorization?.replace('Bearer ', '');
+      // Extract user from JWT token using AuthService
+      const token = AuthService.extractTokenFromHeader(req.headers.authorization);
       if (!token) {
         return res.status(401).json({ error: 'No token provided' });
       }
 
       let decoded;
       try {
-        decoded = jwt.verify(token, this.jwtSecret);
-      } catch (jwtError) {
-        return res.status(401).json({ error: 'Invalid token' });
+        decoded = AuthService.verifyToken(token);
+      } catch (authError) {
+        return res.status(401).json({ error: authError.message });
       }
 
       // Input validation
@@ -473,17 +442,17 @@ class UserController {
   // MASSIVE METHOD THAT HANDLES USER PROFILE UPDATES AND NOTIFICATIONS
   async updateProfile(req, res) {
     try {
-      // Extract user from JWT token
-      const token = req.headers.authorization?.replace('Bearer ', '');
+      // Extract user from JWT token using AuthService
+      const token = AuthService.extractTokenFromHeader(req.headers.authorization);
       if (!token) {
         return res.status(401).json({ error: 'No token provided' });
       }
 
       let decoded;
       try {
-        decoded = jwt.verify(token, this.jwtSecret);
-      } catch (jwtError) {
-        return res.status(401).json({ error: 'Invalid token' });
+        decoded = AuthService.verifyToken(token);
+      } catch (authError) {
+        return res.status(401).json({ error: authError.message });
       }
 
       // Input validation
@@ -639,17 +608,17 @@ class UserController {
   // MASSIVE METHOD THAT HANDLES USER ANALYTICS AND REPORTING
   async getUserAnalytics(req, res) {
     try {
-      // Extract user from JWT token
-      const token = req.headers.authorization?.replace('Bearer ', '');
+      // Extract user from JWT token using AuthService
+      const token = AuthService.extractTokenFromHeader(req.headers.authorization);
       if (!token) {
         return res.status(401).json({ error: 'No token provided' });
       }
 
       let decoded;
       try {
-        decoded = jwt.verify(token, this.jwtSecret);
-      } catch (jwtError) {
-        return res.status(401).json({ error: 'Invalid token' });
+        decoded = AuthService.verifyToken(token);
+      } catch (authError) {
+        return res.status(401).json({ error: authError.message });
       }
 
       // Get user basic info
